@@ -294,7 +294,7 @@ print_stats(void)
 			   "\nSrc IP Address: %d.%d.%d.%d"
 			   "\nDst IP Address: %d.%d.%d.%d"
 			   "\nLatency:    %26"PRIu64
-			   "\nSW timestamp: %26"PRIu64,
+			   "\nSW timestamp: %24"PRIu64,
 			   portid,
 			   l2fwd_ports_eth_addr[portid].addr_bytes[0],
                            l2fwd_ports_eth_addr[portid].addr_bytes[1],
@@ -548,26 +548,25 @@ static void rx_only(void)
 				// free up the mbuf so the it can received another packet
                                 rte_pktmbuf_free(m);
 			}
-
-
-			/* if timer is enabled */
-			if (timer_period > 0) {
-				/* advance the timer */
-				timer_tsc += diff_tsc;
-
-				/* if timer has reached its timeout */
-				if (unlikely(timer_tsc >= timer_period)) {
-					/* do this only on main core */
-					if (lcore_id == rte_get_main_lcore()) {
-						print_stats();
-						/* reset the timer */
-						timer_tsc = 0;
-					}
-				}
-			}
-			prev_tsc = cur_tsc;
 		}
 
+
+		/* if timer is enabled */
+		if (timer_period > 0) {
+			/* advance the timer */
+			timer_tsc += diff_tsc;
+
+			/* if timer has reached its timeout */
+			if (unlikely(timer_tsc >= timer_period)) {
+				/* do this only on main core */
+				if (lcore_id == rte_get_main_lcore()) {
+					print_stats();
+					/* reset the timer */
+					timer_tsc = 0;
+				}
+			}
+		}
+		prev_tsc = cur_tsc;
 	}
 }
 
