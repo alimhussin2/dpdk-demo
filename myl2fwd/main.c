@@ -64,9 +64,9 @@ static inline rte_mbuf_timestamp_t * hwts_field(struct rte_mbuf *mbuf)
 typedef uint64_t tsc_t;
 //static int tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + 1;
 //static int tsc_dynfield_offset = -1;
-static int tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
+//static int tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 
-static inline tsc_t * tsc_field(struct rte_mbuf *mbuf)
+static inline tsc_t * tsc_field(struct rte_mbuf *mbuf, int tsc_dynfield_offset)
 {
 	//return RTE_MBUF_DYNFIELD(mbuf, tsc_dynfield_offset, tsc_t *);
 	struct rte_ether_hdr *eth_hdr;
@@ -135,8 +135,12 @@ struct l2fwd_port_statistics {
 	uint64_t tx;
 	uint64_t rx;
 	uint64_t dropped;
+	uint64_t tx_bytes;
+	uint64_t rx_bytes;
+	uint64_t tx_error;
+	uint64_t rx_error;
 	uint64_t tx_burst;
-	uint8_t rx_burst;
+	uint64_t rx_burst;
 	uint16_t ether_type;
 	uint16_t vlan_tag;
 	uint16_t vlan_id;
@@ -180,12 +184,15 @@ static unsigned tx_only_flag = 0;
 static unsigned l2fwd_flag = 0;
 static unsigned debug_flag = 0;
 static unsigned vlan_flag = 0;
+static unsigned txrx_flag = 0;
 
 /* number of packets, default is 0 mean infinite*/
 static uint64_t nb_pkts = 32;
 
 static void drop_packet(struct rte_mbuf *m, unsigned portid, unsigned nb_rx);
 static inline uint16_t ip_sum(const unaligned_uint16_t *hdr, int hdr_len);
+static void hex_dumps(struct rte_mbuf *m, unsigned portid);
+uint64_t bytes_to_uint64_t(unsigned char *byte, unsigned offset);
 
 #define TICKS_PER_CYCLE_SHIFT 16
 static uint64_t ticks_per_cycle_mult;
@@ -195,9 +202,10 @@ static uint16_t add_timestamps_tx(uint16_t portid, uint16_t qidx __rte_unused,
 {
 	unsigned i;
 	uint64_t now = rte_rdtsc();
+	int tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 
 	for (i = 0; i < nb_pkts; i++) {
-		*tsc_field(pkts[i]) = now;
+		*tsc_field(pkts[i], tsc_dynfield_offset) = now;
 		port_statistics[portid].timestamp = now;
 	}
 	return nb_pkts;
@@ -209,12 +217,16 @@ static uint16_t add_timestamps(uint16_t portid __rte_unused, uint16_t qidx __rte
 {
 	unsigned i;
 	uint64_t now = rte_rdtsc();
+	int tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + 8;
 
-	for (i = 0; i < nb_pkts; i++)
-		*tsc_field(pkts[i]) = now;
+	for (i = 0; i < nb_pkts; i++) {
+		*tsc_field(pkts[i], tsc_dynfield_offset) = now;
+		port_statistics[portid].timestamp = now;
+	}
 	return nb_pkts;
 }
 
+/*
 static uint16_t calc_latency(uint16_t portid, uint16_t qidx __rte_unused,
 		struct rte_mbuf **pkts, uint16_t nb_pkts, void *_ __rte_unused)
 {
@@ -251,6 +263,37 @@ static uint16_t calc_latency(uint16_t portid, uint16_t qidx __rte_unused,
 	}
 	return nb_pkts;
 }
+*/
+
+static uint16_t calc_latency1(uint16_t portid __rte_unused, uint16_t qidx __rte_unused,
+                struct rte_mbuf **pkts, uint16_t nb_pkts,
+                uint16_t max_pkts __rte_unused, void *_ __rte_unused)
+{
+        uint64_t cycles = 0;
+        uint64_t queue_ticks = 0;
+        uint64_t now = rte_rdtsc();
+        uint64_t latency_cycles;
+        unsigned i;
+	int tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
+
+        for (i = 0; i < nb_pkts; i++) {
+                cycles += now - *tsc_field(pkts[i], tsc_dynfield_offset);
+        }
+
+        latency_numbers.total_cycles += cycles;
+        latency_numbers.total_pkts += nb_pkts;
+	/* latency in cycles */
+	latency_cycles = latency_numbers.total_cycles / latency_numbers.total_pkts;
+	port_statistics[portid].latency = latency_cycles;
+
+	if (latency_numbers.total_pkts > (100 * 1000 * 1000ULL)) {
+		latency_numbers.total_cycles = 0;
+                latency_numbers.total_queue_cycles = 0;
+                latency_numbers.total_pkts = 0;
+	}
+
+        return nb_pkts;
+}
 
 /* Print out statistics on packets dropped */
 static void
@@ -275,13 +318,18 @@ print_stats(void)
 		/* skip disabled ports */
 		if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
 			continue;
+
 		printf("\nStatistics for port %u ------------------------------"
 			"\nMAC Address: %02X:%02X:%02X:%02X:%02X:%02X"
 			   "\nPackets sent: %24"PRIu64
 			   "\nPackets received: %20"PRIu64
 			   "\nPackets dropped: %21"PRIu64
 			   "\nPackets sent burst: %18"PRIu64
-			   "\nPackets received burst: %14"PRIu8
+			   "\nPackets received burst: %14"PRIu64
+			   "\nPackets transmit error: %14"PRIu64
+			   "\nPackets received error: %14"PRIu64
+			   "\nPackets transmit bytes: %14"PRIu64
+			   "\nPackets received bytes: %14"PRIu64
 			   "\nSrc MAC Address: %02X:%02X:%02X:%02X:%02X:%02X"
 			   "\nDst MAC Address: %02X:%02X:%02X:%02X:%02X:%02X"
 			   "\nEther type: %26"PRIx16
@@ -307,6 +355,10 @@ print_stats(void)
 			   port_statistics[portid].dropped,
 			   port_statistics[portid].tx_burst,
 			   port_statistics[portid].rx_burst,
+			   port_statistics[portid].tx_error,
+			   port_statistics[portid].rx_error,
+			   port_statistics[portid].tx_bytes,
+			   port_statistics[portid].rx_bytes,
 			   port_statistics[portid].s_addr.addr_bytes[0],
 			   port_statistics[portid].s_addr.addr_bytes[1],
 			   port_statistics[portid].s_addr.addr_bytes[2],
@@ -408,9 +460,11 @@ static struct rte_mbuf *construct_packet(unsigned portid)
 	/* initialize ethernet header */
 	eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
 	rte_ether_addr_copy(&dst_ether_addr, &eth_hdr->d_addr);
-	/*rte_ether_addr_copy(&src_ether_addr, &eth_hdr->s_addr);*/
+	rte_ether_addr_copy(&src_ether_addr, &eth_hdr->s_addr);
+
 	/* get mac address as src MAC */
-	rte_eth_macaddr_get(portid, &eth_hdr->s_addr);
+	//rte_eth_macaddr_get(portid, &eth_hdr->s_addr);
+
 	/* standard ethernet type 802.3 */
 	eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
 
@@ -500,6 +554,23 @@ static inline uint16_t ip_sum(const unaligned_uint16_t *hdr, int hdr_len)
 	return ~sum;
 }
 
+static void hex_dumps(struct rte_mbuf *m, unsigned portid)
+{
+	unsigned char *p = rte_pktmbuf_mtod(m, unsigned char *);
+	unsigned i, j;
+
+	j = 0;
+	for (i = 0; i < m->pkt_len; i++) {
+		if ( j == 15) {
+			printf("\n");
+			j = 0;
+		}
+		printf("%02x ", ((*p) & 0xffff));
+		p++;
+		j++;
+	}
+	printf("\n\n");
+}
 
 static void rx_only(void)
 {
@@ -582,6 +653,264 @@ static void drop_packet(struct rte_mbuf *m, unsigned portid, unsigned nb_rx)
 	}
 
 }
+
+static void txrx1(void)
+{
+	/* WIP: each port can transmit and received */
+
+	struct rte_mbuf *pkts_burst[MAX_PKT_BURST];
+	struct rte_mbuf *m;
+        uint64_t pkt_idx = 0;
+
+        unsigned lcore_id;
+        unsigned i, j, portid, nb_tx, nb_rx;
+        int nb_tx_actual;
+        struct rte_eth_stats eth_stats;
+        struct lcore_queue_conf *qconf;
+        uint64_t prev_tsc, diff_tsc, cur_tsc, timer_tsc;
+	const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S *
+                        BURST_TX_DRAIN_US;
+
+        lcore_id = rte_lcore_id();
+        qconf = &lcore_queue_conf[lcore_id];
+
+        prev_tsc = 0;
+        timer_tsc = 0;
+
+        if (qconf->n_rx_port == 0) {
+                RTE_LOG(INFO, L2FWD, "lcore %u has nothing to do\n", lcore_id);
+                return;
+        }
+
+        RTE_LOG(INFO, L2FWD, "entering main loop on lcore %u\n", lcore_id);
+
+        for (i = 0; i < qconf->n_rx_port; i++) {
+
+                portid = qconf->rx_port_list[i];
+                RTE_LOG(INFO, L2FWD, " -- lcoreid=%u portid=%u\n", lcore_id,
+                        portid);
+
+        }
+
+	m = construct_packet(portid);
+	if (m == NULL)
+		rte_exit(EXIT_FAILURE, "failed to construct packet");
+
+        while (!force_quit) {
+                cur_tsc = rte_rdtsc();
+                diff_tsc = cur_tsc - prev_tsc;
+
+		if (unlikely(diff_tsc > drain_tsc)) {
+			for (i = 0; i < qconf->n_rx_port; i++) {
+				portid = l2fwd_dst_ports[qconf->rx_port_list[i]];
+			// handle to transmit packet on port 0
+			//portid = 0;
+
+			nb_tx = rte_eth_tx_burst(portid, 0, &m, 1);
+			if (nb_tx) {
+				port_statistics[portid].tx += nb_tx;
+				port_statistics[portid].tx_burst = nb_tx;
+				//hex_dumps(m, portid);
+				intercept_packets(m, portid);
+				// free up the mbuf so the it can transmit another packet
+				rte_pktmbuf_free(m);
+			}
+			}
+			// if timer is enabled
+			if (timer_period > 0) {
+				// advance the timer
+				timer_tsc += diff_tsc;
+
+				// if timer has reached its timeout
+				if (unlikely(timer_tsc >= timer_period)) {
+					// do this only on main core
+					if (lcore_id == rte_get_main_lcore()) {
+						print_stats();
+						// reset the timer
+						timer_tsc = 0;
+					}
+				}
+			}
+			prev_tsc = cur_tsc;
+		}
+
+		for (i = 0; i < qconf->n_rx_port; i++) {
+			portid = qconf->rx_port_list[i];
+		// handle for received packet on port 1
+		//portid = 1;
+		nb_rx = rte_eth_rx_burst(portid, 0, pkts_burst, MAX_PKT_BURST);
+		if (unlikely(nb_rx == 0))
+			continue;
+
+		for (j = 0; j < nb_rx; j++) {
+			m = pkts_burst[j];
+			struct rte_ether_hdr *eth_hdr;
+			eth_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+			uint16_t ether_type = rte_cpu_to_be_16(eth_hdr->ether_type);
+			intercept_packets(m, portid);
+			rte_prefetch0(rte_pktmbuf_mtod(m, void *));
+			port_statistics[portid].rx += 1;
+			port_statistics[portid].rx_burst = 1;
+			// free up the mbuf so the it can received another packet
+			rte_pktmbuf_free(m);
+		}
+		}
+
+        }
+}
+
+static void txrx(void)
+{
+        /* WIP: port 0 tx, port 1 rx */
+
+        struct rte_mbuf *rx_pkts_burst[MAX_PKT_BURST];
+        struct rte_mbuf *tx_pkt;
+	struct rte_mbuf *rx_pkt;
+        uint64_t pkt_idx = 0;
+
+        unsigned lcore_id;
+        unsigned i, j, portid, nb_tx, nb_rx;
+        struct lcore_queue_conf *qconf;
+        uint64_t prev_tsc, diff_tsc, cur_tsc, timer_tsc;
+        const uint64_t drain_tsc = (rte_get_tsc_hz() + US_PER_S - 1) / US_PER_S *
+                        BURST_TX_DRAIN_US;
+
+	unsigned nb_tx_actual, nb_rx_actual;
+        struct rte_eth_stats eth_tx_stats;
+	struct rte_eth_stats eth_rx_stats;
+
+        lcore_id = rte_lcore_id();
+        qconf = &lcore_queue_conf[lcore_id];
+
+        prev_tsc = 0;
+        timer_tsc = 0;
+
+        if (qconf->n_rx_port == 0) {
+                RTE_LOG(INFO, L2FWD, "lcore %u has nothing to do\n", lcore_id);
+                return;
+        }
+
+        RTE_LOG(INFO, L2FWD, "entering main loop on lcore %u\n", lcore_id);
+
+        for (i = 0; i < qconf->n_rx_port; i++) {
+
+                portid = qconf->rx_port_list[i];
+                RTE_LOG(INFO, L2FWD, " -- lcoreid=%u portid=%u\n", lcore_id,
+                        portid);
+
+        }
+
+        tx_pkt = construct_packet(portid);
+        if (tx_pkt == NULL)
+                rte_exit(EXIT_FAILURE, "failed to construct packet");
+
+	while (!force_quit) {
+                cur_tsc = rte_rdtsc();
+                diff_tsc = cur_tsc - prev_tsc;
+
+                if (unlikely(diff_tsc > drain_tsc)) {
+                        // handle to transmit packet on port 0
+                        portid = 0;
+
+                        nb_tx = rte_eth_tx_burst(portid, 0, &tx_pkt, 1);
+			nb_tx_actual = rte_eth_stats_get(portid, &eth_tx_stats);
+
+			if (nb_tx_actual == 0) {
+				port_statistics[portid].tx_burst = eth_tx_stats.opackets;
+				port_statistics[portid].dropped = eth_tx_stats.imissed;
+				port_statistics[portid].tx_bytes = eth_rx_stats.obytes;
+				port_statistics[portid].rx_bytes = eth_rx_stats.ibytes;
+			}
+			else {
+				port_statistics[portid].tx_error = eth_tx_stats.oerrors;
+				port_statistics[portid].rx_error = eth_tx_stats.ierrors;
+			}
+
+                        if (nb_tx) {
+                                port_statistics[portid].tx += nb_tx;
+                                //port_statistics[portid].tx_burst = nb_tx;
+                                //hex_dumps(tx_pkt, portid);
+                                intercept_packets(tx_pkt, portid);
+                                // free up the mbuf so the it can transmit another packet
+                                rte_pktmbuf_free(tx_pkt);
+                        }
+
+                        // if timer is enabled
+                        if (timer_period > 0) {
+                                // advance the timer
+                                timer_tsc += diff_tsc;
+
+                                // if timer has reached its timeout
+                                if (unlikely(timer_tsc >= timer_period)) {
+                                        // do this only on main core
+                                        if (lcore_id == rte_get_main_lcore()) {
+                                                print_stats();
+                                                // reset the timer
+                                                timer_tsc = 0;
+                                        }
+                                }
+                        }
+                        prev_tsc = cur_tsc;
+                }
+
+                // handle for received packet on port 1
+                portid = 1;
+                //nb_rx = rte_eth_rx_burst(portid, 0, rx_pkts_burst, MAX_PKT_BURST);
+
+		nb_rx = rte_eth_rx_burst(portid, 0, &rx_pkt, 1);
+
+		nb_rx_actual = rte_eth_stats_get(portid, &eth_rx_stats);
+                if (nb_tx_actual == 0) {
+			port_statistics[portid].rx_burst = eth_rx_stats.ipackets;
+			port_statistics[portid].dropped = eth_rx_stats.imissed;
+			port_statistics[portid].tx_bytes = eth_rx_stats.obytes;
+			port_statistics[portid].rx_bytes = eth_rx_stats.ibytes;
+		}
+		else {
+			port_statistics[portid].tx_error = eth_tx_stats.oerrors;
+			port_statistics[portid].rx_error = eth_tx_stats.ierrors;
+		}
+
+                if (unlikely(nb_rx == 0))
+                        continue;
+
+                /* not use
+		for (j = 0; j < nb_rx; j++) {
+                        rx_pkt = rx_pkts_burst[j];
+                        rte_prefetch0(rte_pktmbuf_mtod(rx_pkt, void *));
+
+			intercept_packets(rx_pkt, portid);
+			//hex_dumps(rx_pkt, portid);
+
+			port_statistics[portid].rx += nb_rx;
+                        //port_statistics[portid].rx_burst = nb_rx;
+
+			// free up the mbuf so the it can received another packet
+                        rte_pktmbuf_free(rx_pkt);
+                }
+		*/
+
+		for (j = 0; j < nb_rx; j++) {
+                        //rte_prefetch0(rte_pktmbuf_mtod(rx_pkt, void *));
+                        intercept_packets(rx_pkt, portid);
+                        //hex_dumps(rx_pkt, portid);
+
+                        port_statistics[portid].rx += nb_rx;
+                        //port_statistics[portid].rx_burst = nb_rx;
+
+                        // free up the mbuf so the it can received another packet
+                        rte_pktmbuf_free(rx_pkt);
+                }
+
+		// debug: send 1 packet then stop
+		/*
+		if (lcore_id == rte_get_main_lcore())
+			print_stats();
+		force_quit = 1;
+		*/
+        }
+}
+
 static void tx_only(void)
 {
 	struct rte_mbuf *m;
@@ -620,6 +949,8 @@ static void tx_only(void)
 	if (m == NULL)
 		rte_exit(EXIT_FAILURE, "failed to construct packet");
 
+	unsigned char *cp;
+
 	while (!force_quit) {
                 cur_tsc = rte_rdtsc();
                 diff_tsc = cur_tsc - prev_tsc;
@@ -635,7 +966,10 @@ static void tx_only(void)
 				port_statistics[portid].tx_burst = nb_tx;
 				//if (nb_tx_actual == 0)
                                 //	port_statistics[portid].tx_burst = eth_stats.opackets;
+
+				//hex_dumps(m, portid);
 				intercept_packets(m, portid);
+
 				// free up the mbuf so the it can received another packet
                                 rte_pktmbuf_free(m);
                         }
@@ -795,6 +1129,20 @@ l2fwd_main_loop(void)
 	}
 }
 
+uint64_t bytes_to_uint64_t(unsigned char *byte, unsigned offset)
+{
+	uint64_t output = 0;
+        byte += offset;
+
+        for (int i = 0; i < 8; i++) {
+                output <<= 8;
+                output |= (*byte & 0xffff);
+                byte--;
+        }
+
+	return output;
+}
+
 static void intercept_packets(struct rte_mbuf *m, unsigned portid)
 {
 	struct rte_ether_hdr *eth_hdr;
@@ -808,6 +1156,24 @@ static void intercept_packets(struct rte_mbuf *m, unsigned portid)
 
 	eth_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 	ether_type = rte_be_to_cpu_16(eth_hdr->ether_type);
+
+	/* get tx timestamp from the tx packet */
+	/*
+	offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
+	unsigned char *tp = rte_pktmbuf_mtod_offset(m, unsigned char *, offset);
+	uint64_t tx_timestampd, rx_timestampd, latency;
+
+	tx_timestampd = bytes_to_uint64_t(tp, 7);
+	rx_timestampd = rte_rdtsc();
+	latency = rx_timestampd - tx_timestampd;
+	port_statistics[portid].latency = latency;
+	*/
+
+
+	//printf("\ntimestamp in hex = %lx\n", tx_timestampd);
+	//printf("timestamp in decimal = %lu\n", tx_timestampd);
+
+	//printf("\n\n");
 
 	/*
 	 * l3 will point to memory address of 14th after eth_hdr. This is a pointer arithmetic.
@@ -885,6 +1251,8 @@ l2fwd_launch_one_lcore(__rte_unused void *dummy)
 		rx_only();
 	else if (l2fwd_flag)
 		l2fwd_main_loop();
+	else if (txrx_flag)
+		txrx();
 	else if (debug_flag)
 		mbuf_manipulation();
 	else
@@ -1030,6 +1398,7 @@ static const char short_options[] =
 #define CMD_LINE_OPT_L2FWD "l2fwd"
 #define CMD_LINE_OPT_DEBUG "debug"
 #define CMD_LINE_OPT_VLAN "vlan"
+#define CMD_LINE_OPT_TXRX "txrx"
 
 enum {
 	/* long options mapped to a short option */
@@ -1043,6 +1412,7 @@ enum {
 	CMD_LINE_OPT_L2FWD_NUM,
 	CMD_LINE_OPT_DEBUG_NUM,
 	CMD_LINE_OPT_VLAN_NUM,
+	CMD_LINE_OPT_TXRX_NUM,
 };
 
 static const struct option lgopts[] = {
@@ -1054,6 +1424,7 @@ static const struct option lgopts[] = {
 	{ CMD_LINE_OPT_L2FWD, 0, 0, CMD_LINE_OPT_L2FWD_NUM},
 	{ CMD_LINE_OPT_DEBUG, 0, 0, CMD_LINE_OPT_DEBUG_NUM},
 	{ CMD_LINE_OPT_VLAN, 0, 0, CMD_LINE_OPT_VLAN_NUM},
+	{ CMD_LINE_OPT_TXRX, 0, 0, CMD_LINE_OPT_TXRX_NUM},
 	{NULL, 0, 0, 0}
 };
 
@@ -1127,6 +1498,11 @@ l2fwd_parse_args(int argc, char **argv)
 		/* l2fwd */
 		case CMD_LINE_OPT_L2FWD_NUM:
 			l2fwd_flag = 1;
+			break;
+
+		/* txrx */
+		case CMD_LINE_OPT_TXRX_NUM:
+			txrx_flag = 1;
 			break;
 
 		/* enable vlan packet */
@@ -1383,6 +1759,7 @@ main(int argc, char **argv)
 		       portid, l2fwd_dst_ports[portid]);
 	}
 
+
 	nb_mbufs = RTE_MAX(nb_ports * (nb_rxd + nb_txd + MAX_PKT_BURST +
 		nb_lcores * MEMPOOL_CACHE_SIZE), 8192U);
 
@@ -1563,7 +1940,13 @@ main(int argc, char **argv)
 
 		//rte_eth_add_rx_callback(portid, 0, add_timestamps, NULL);
 		//rte_eth_add_tx_callback(portid, 0, calc_latency, NULL);
+
 		rte_eth_add_tx_callback(portid, 0, add_timestamps_tx, NULL);
+		//rte_eth_add_rx_callback(portid, 0, add_timestamps, NULL);
+
+		/* disable calc_latency1 if using rx_only mode */
+		if (!rx_only_flag)
+			rte_eth_add_rx_callback(portid, 0, calc_latency1, NULL);
 	}
 
 	if (!nb_ports_available) {
