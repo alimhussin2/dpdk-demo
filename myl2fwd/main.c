@@ -195,6 +195,7 @@ static void drop_packet(struct rte_mbuf *m, unsigned portid, unsigned nb_rx);
 static inline uint16_t ip_sum(const unaligned_uint16_t *hdr, int hdr_len);
 static void hex_dumps(struct rte_mbuf *m, unsigned portid);
 uint64_t bytes_to_uint64_t(unsigned char *byte, unsigned offset);
+static void calculate_latency(struct rte_mbuf *m, unsigned portid, unsigned nb_pkts);
 
 #define TICKS_PER_CYCLE_SHIFT 16
 static uint64_t ticks_per_cycle_mult;
@@ -220,7 +221,12 @@ static uint16_t add_timestamps_tx(uint16_t portid, uint16_t qidx __rte_unused,
 	clock_gettime(CLOCK_MONOTONIC_RAW, &t_tx);
 	uint64_t now = t_tx.tv_nsec;
 	unsigned i;
-        int tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
+	int tsc_dynfield_offset;
+
+	if (vlan_flag)
+		tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + 4;
+	else
+		tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 
         for (i = 0; i < nb_pkts; i++) {
                 *tsc_field(pkts[i], tsc_dynfield_offset) = now;
@@ -330,8 +336,13 @@ static uint16_t calc_latency1(uint16_t portid __rte_unused, uint16_t qidx __rte_
         uint64_t latency_cycles = 0;
         unsigned i;
 	double latency_us = 0;
-        int tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 	int64_t jitter;
+        int tsc_dynfield_offset;
+
+	if (vlan_flag)
+		tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + 4;
+	else
+		tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 
 	if (likely(nb_pkts == 0))
 		return 0;
@@ -366,7 +377,6 @@ static uint16_t calc_latency1(uint16_t portid __rte_unused, uint16_t qidx __rte_
 
 	latency_numbers.latency = latency_cycles;
 
-
         if (latency_numbers.total_pkts > (100 * 1000 * 1000ULL)) {
                 latency_numbers.total_cycles = 0;
                 latency_numbers.total_pkts = 0;
@@ -375,9 +385,101 @@ static uint16_t calc_latency1(uint16_t portid __rte_unused, uint16_t qidx __rte_
         return nb_pkts;
 }
 
+
+static void print_stats(void)
+{
+	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx;
+        unsigned portid;
+
+        total_packets_dropped = 0;
+        total_packets_tx = 0;
+        total_packets_rx = 0;
+
+        const char clr[] = { 27, '[', '2', 'J', '\0' };
+        const char topLeft[] = { 27, '[', '1', ';', '1', 'H','\0' };
+
+                /* Clear screen and move to top left */
+        printf("%s%s", clr, topLeft);
+
+	printf("\nPort statistics ====================================");
+
+	for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
+                /* skip disabled ports */
+                if ((l2fwd_enabled_port_mask & (1 << portid)) == 0)
+                        continue;
+
+                printf("\nStatistics for port %u ------------------------------", portid);
+		printf("\nMAC Address: %02X:%02X:%02X:%02X:%02X:%02X",
+			l2fwd_ports_eth_addr[portid].addr_bytes[0],
+			l2fwd_ports_eth_addr[portid].addr_bytes[1],
+			l2fwd_ports_eth_addr[portid].addr_bytes[2],
+			l2fwd_ports_eth_addr[portid].addr_bytes[3],
+			l2fwd_ports_eth_addr[portid].addr_bytes[4],
+			l2fwd_ports_eth_addr[portid].addr_bytes[5]);
+		printf("\nPackets Tx/Rx:       %18"PRIu64"/%"PRIu64,
+			port_statistics[portid].tx, port_statistics[portid].rx);
+		printf("\nPackets dropped:     %18"PRIu64,
+			port_statistics[portid].dropped);
+		printf("\nPackets Tx/Rx burst: %18"PRIu64"/%"PRIu64,
+			port_statistics[portid].tx_burst, port_statistics[portid].rx_burst);
+		printf("\nPkts Bytes Tx/Rx:    %18"PRIu64"/%"PRIu64,
+			port_statistics[portid].tx_bytes, port_statistics[portid].rx_bytes);
+		printf("\nPkts error Tx/Rx:    %18"PRIu64"/%"PRIu64,
+			port_statistics[portid].tx_error, port_statistics[portid].rx_error);
+		printf("\nSrc MAC Address: %02X:%02X:%02X:%02X:%02X:%02X",
+			port_statistics[portid].s_addr.addr_bytes[0],
+			port_statistics[portid].s_addr.addr_bytes[1],
+			port_statistics[portid].s_addr.addr_bytes[2],
+			port_statistics[portid].s_addr.addr_bytes[3],
+			port_statistics[portid].s_addr.addr_bytes[4],
+			port_statistics[portid].s_addr.addr_bytes[5]);
+		printf("\nDst MAC Address: %02X:%02X:%02X:%02X:%02X:%02X",
+			port_statistics[portid].d_addr.addr_bytes[0],
+			port_statistics[portid].d_addr.addr_bytes[1],
+			port_statistics[portid].d_addr.addr_bytes[2],
+			port_statistics[portid].d_addr.addr_bytes[3],
+			port_statistics[portid].d_addr.addr_bytes[4],
+			port_statistics[portid].d_addr.addr_bytes[5]);
+		printf("\nEther Type:          %18"PRIx16, port_statistics[portid].ether_type);
+		printf("\nVLAN ID:             %18"PRIu16, port_statistics[portid].vlan_id);
+		printf("\nVLAN Priority:       %18"PRIu16, port_statistics[portid].vlan_priority);
+		printf("\nPacket Lenght:       %18"PRIu32, port_statistics[portid].pkt_length);
+		printf("\nData Length:         %18"PRIu16, port_statistics[portid].data_len);
+		printf("\nIP Protocol:         %18s", port_statistics[portid].ip_protocol);
+		printf("\nSrc IP Address: %d.%d.%d.%d",
+			port_statistics[portid].ip_s_addr[0],
+			port_statistics[portid].ip_s_addr[1],
+			port_statistics[portid].ip_s_addr[2],
+			port_statistics[portid].ip_s_addr[3]);
+		printf("\nDst IP Address: %d.%d.%d.%d",
+			port_statistics[portid].ip_d_addr[0],
+			port_statistics[portid].ip_d_addr[1],
+			port_statistics[portid].ip_d_addr[2],
+			port_statistics[portid].ip_d_addr[3]);
+		printf("\nSW Jitter (ns)       %18ld", port_statistics[portid].jitter_ns);
+		printf("\nSW Latency (us):     %18.2f", port_statistics[portid].latency_us);
+		printf("\nSW timestamp (ns):   %18"PRIu64, port_statistics[portid].timestamp);
+
+		total_packets_dropped += port_statistics[portid].dropped;
+                total_packets_tx += port_statistics[portid].tx;
+                total_packets_rx += port_statistics[portid].rx;
+        }
+        printf("\nAggregate statistics ==============================="
+                   "\nTotal packets sent:      %14"PRIu64
+                   "\nTotal packets received:  %14"PRIu64
+                   "\nTotal packets dropped:   %14"PRIu64,
+                   total_packets_tx,
+                   total_packets_rx,
+                   total_packets_dropped);
+        printf("\n====================================================\n");
+
+	fflush(stdout);
+}
+
+
 /* Print out statistics on packets dropped */
 static void
-print_stats(void)
+print_stats1(void)
 {
 	uint64_t total_packets_dropped, total_packets_tx, total_packets_rx;
 	unsigned portid;
@@ -930,9 +1032,9 @@ static void txrx(void)
                         if (nb_tx) {
 				//rte_prefetch0(rte_pktmbuf_mtod(tx_pkt, void *));
                                 //port_statistics[portid].tx += nb_tx;
-				//printf("tx packet dump\n");
+				printf("tx packet dump\n");
                                 port_statistics[portid].tx_burst = nb_tx;
-                                //hex_dumps(tx_pkt, portid);
+                                hex_dumps(tx_pkt, portid);
                                 intercept_packets(tx_pkt, portid);
                                 // free up the mbuf so the it can transmit another packet
                                 rte_pktmbuf_free(tx_pkt);
@@ -977,9 +1079,9 @@ static void txrx(void)
                         continue;
 
 		for (j = 0; j < nb_rx; j++) {
-			//printf("\nrx packet dump\n");
+			printf("\nrx packet dump\n");
                         intercept_packets(rx_pkt, portid);
-                        //hex_dumps(rx_pkt, portid);
+                        hex_dumps(rx_pkt, portid);
 
                         port_statistics[portid].rx_burst = nb_rx;
 
@@ -1017,6 +1119,7 @@ static void txrx_burst(void)
         struct rte_eth_stats eth_tx_stats;
         struct rte_eth_stats eth_rx_stats;
         struct rte_eth_dev_tx_buffer *buffer;
+	unsigned tx_lcore_id, rx_lcore_id;
 
         lcore_id = rte_lcore_id();
         qconf = &lcore_queue_conf[lcore_id];
@@ -1032,7 +1135,7 @@ static void txrx_burst(void)
         RTE_LOG(INFO, L2FWD, "entering main loop on lcore %u\n", lcore_id);
 
         for (i = 0; i < qconf->n_rx_port; i++) {
-
+		printf("idx = %d\n", i);
                 portid = qconf->rx_port_list[i];
                 RTE_LOG(INFO, L2FWD, " -- lcoreid=%u portid=%u\n", lcore_id,
                         portid);
@@ -1048,6 +1151,9 @@ static void txrx_burst(void)
         while (!force_quit) {
                 cur_tsc = rte_rdtsc();
 		diff_tsc = cur_tsc - prev_tsc;
+
+		/* TODO: let lcore x run on port 0 and lcore y run on port 1 */
+		if (lcore_id == 0) {
 
                 if (unlikely(diff_tsc > drain_tsc)) {
                         /* send packet in burst */
@@ -1076,8 +1182,7 @@ static void txrx_burst(void)
 
                         for (j = 0; j < nb_tx; j++) {
                                 //rte_prefetch0(rte_pktmbuf_mtod(tx_pkt, void *));
-                                //port_statistics[portid].tx += nb_tx;
-                                port_statistics[portid].tx_burst = nb_tx;
+				port_statistics[portid].tx_burst = nb_tx;
                                 //hex_dumps(tx_pkt, portid);
                                 intercept_packets(tx_pkt, portid);
                                 // free up the mbuf so the it can transmit another packet
@@ -1101,8 +1206,11 @@ static void txrx_burst(void)
                         }
                         prev_tsc = cur_tsc;
                 }
+		continue;
+		}
 
-                /* received in burst */
+		if (lcore_id == 1) {
+                /* received in burst. lcore 1 handle port 1 */
                 // handle for received packet on port 1
                 portid = 1;
                 nb_rx = rte_eth_rx_burst(portid, 0, rx_pkts_burst, MAX_PKT_BURST);
@@ -1119,16 +1227,18 @@ static void txrx_burst(void)
                         port_statistics[portid].rx_error = eth_rx_stats.ierrors;
                 }
 
+
                 if (unlikely(nb_rx == 0))
                         continue;
 
                 for (j = 0; j < nb_rx; j++) {
                         rx_pkt = rx_pkts_burst[j];
+			//port_statistics[portid].rx_burst = nb_rx;
 
                         intercept_packets(rx_pkt, portid);
                         //hex_dumps(rx_pkt, portid);
 
-                        port_statistics[portid].rx_burst = nb_rx;
+                        //port_statistics[portid].rx_burst = nb_rx;
 			// free up the mbuf so the it can received another packet
                         rte_pktmbuf_free(rx_pkt);
                 }
@@ -1139,7 +1249,9 @@ static void txrx_burst(void)
 				print_stats();
 			force_quit = 1;
 		}
+
         }
+	}
 }
 
 
@@ -1348,6 +1460,43 @@ uint64_t bytes_to_uint64_t(unsigned char *byte, unsigned offset)
 	return output;
 }
 
+static void calculate_latency(struct rte_mbuf *m, unsigned portid, unsigned nb_pkts)
+{
+	/* This function is not accurate is it too late to get rx timestamp. */
+        unsigned offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
+        unsigned char *tp = rte_pktmbuf_mtod_offset(m, unsigned char *, offset);
+        uint64_t tx_timestampd, rx_timestampd;
+	uint64_t latency = 0;
+	double latency_us = 0;
+	struct timespec t_rx;
+	int64_t jitter = 0;
+
+        /* get rx timestamp in nanoseconds */
+	clock_gettime(CLOCK_MONOTONIC_RAW, &t_rx);
+        rx_timestampd = t_rx.tv_nsec;
+
+	/* convert tx timestamp of 8 bytes from tx packet to uint64_t */
+	tx_timestampd = bytes_to_uint64_t(tp, 7);
+
+	port_statistics[portid].timestamp = rx_timestampd;
+	latency_numbers.total_pkts += nb_pkts;
+
+	/* skip calculate latency if rx timestamp overflow and reset to 0 */
+	if (likely(rx_timestampd > tx_timestampd)) {
+		latency = rx_timestampd - tx_timestampd;
+		latency_numbers.total_cycles += latency;
+		latency_us = ((double)latency_numbers.total_cycles / (double)latency_numbers.total_pkts) / 1000;
+		port_statistics[portid].latency_us = latency_us;
+
+		jitter = latency - latency_numbers.latency;
+		if (jitter != 0)
+			port_statistics[portid].jitter_ns = abs(jitter);
+
+		latency_numbers.latency = latency;
+		port_statistics[portid].jitter_ns = jitter;
+	}
+}
+
 static void intercept_packets(struct rte_mbuf *m, unsigned portid)
 {
 	struct rte_ether_hdr *eth_hdr;
@@ -1361,24 +1510,6 @@ static void intercept_packets(struct rte_mbuf *m, unsigned portid)
 
 	eth_hdr = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 	ether_type = rte_be_to_cpu_16(eth_hdr->ether_type);
-
-	/* get tx timestamp from the tx packet */
-	/*
-	offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
-	unsigned char *tp = rte_pktmbuf_mtod_offset(m, unsigned char *, offset);
-	uint64_t tx_timestampd, rx_timestampd, latency;
-
-	tx_timestampd = bytes_to_uint64_t(tp, 7);
-	rx_timestampd = rte_rdtsc();
-	latency = rx_timestampd - tx_timestampd;
-	port_statistics[portid].latency = latency;
-	*/
-
-
-	//printf("\ntimestamp in hex = %lx\n", tx_timestampd);
-	//printf("timestamp in decimal = %lu\n", tx_timestampd);
-
-	//printf("\n\n");
 
 	/*
 	 * l3 will point to memory address of 14th after eth_hdr. This is a pointer arithmetic.
