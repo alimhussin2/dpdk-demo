@@ -680,10 +680,10 @@ static struct rte_mbuf *construct_packet(unsigned portid)
 	/* initialize ethernet header */
 	eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
 	rte_ether_addr_copy(&dst_ether_addr, &eth_hdr->d_addr);
-	rte_ether_addr_copy(&src_ether_addr, &eth_hdr->s_addr);
+	//rte_ether_addr_copy(&src_ether_addr, &eth_hdr->s_addr);
 
 	/* get mac address as src MAC */
-	//rte_eth_macaddr_get(portid, &eth_hdr->s_addr);
+	rte_eth_macaddr_get(portid, &eth_hdr->s_addr);
 
 	/* standard ethernet type 802.3 */
 	eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
@@ -1741,6 +1741,37 @@ l2fwd_parse_portmask(const char *portmask)
 	return pm;
 }
 
+static int l2fwd_parse_dst_mac(const char *q_arg)
+{
+	int n = -5;
+	//printf("\nDestination mac = %s\n", q_arg);
+
+	char dst_mac_str[] = "000000000000";
+	int i;
+	int j = 0;
+	for (i = 0; i < 17; i++) {
+		if (q_arg[i] != ':')
+			dst_mac_str[j++] = q_arg[i];
+		else if (q_arg[i] == ':')
+			n++;
+	}
+
+	char dummy[3] = "00";
+	j = 0;
+	int k;
+	uint8_t num = 0;
+	for (k = 0; k < 6; k++) {
+		for (i = 0; i < 2; i++)
+			dummy[i] = dst_mac_str[i+j];
+		num = strtol(dummy, NULL, 16);
+		j += 2;
+		printf("0x%02x\n", num);
+		dst_ether_addr.addr_bytes[k] = num;
+	}
+
+	return n;
+}
+
 static int
 l2fwd_parse_port_pair_config(const char *q_arg)
 {
@@ -1845,6 +1876,7 @@ static const char short_options[] =
 #define CMD_LINE_OPT_DEBUG "debug"
 #define CMD_LINE_OPT_VLAN "vlan"
 #define CMD_LINE_OPT_TXRX "txrx"
+#define CMD_LINE_OPT_DST_MAC "dst-mac"
 
 enum {
 	/* long options mapped to a short option */
@@ -1859,6 +1891,7 @@ enum {
 	CMD_LINE_OPT_DEBUG_NUM,
 	CMD_LINE_OPT_VLAN_NUM,
 	CMD_LINE_OPT_TXRX_NUM,
+	CMD_LINE_OPT_DST_MAC_NUM,
 };
 
 static const struct option lgopts[] = {
@@ -1871,6 +1904,7 @@ static const struct option lgopts[] = {
 	{ CMD_LINE_OPT_DEBUG, 0, 0, CMD_LINE_OPT_DEBUG_NUM},
 	{ CMD_LINE_OPT_VLAN, 0, 0, CMD_LINE_OPT_VLAN_NUM},
 	{ CMD_LINE_OPT_TXRX, 0, 0, CMD_LINE_OPT_TXRX_NUM},
+	{ CMD_LINE_OPT_DST_MAC, 1, 0, CMD_LINE_OPT_DST_MAC_NUM},
 	{NULL, 0, 0, 0}
 };
 
@@ -1949,6 +1983,12 @@ l2fwd_parse_args(int argc, char **argv)
 		/* txrx */
 		case CMD_LINE_OPT_TXRX_NUM:
 			txrx_flag = 1;
+			break;
+
+		/* set destination MAC address */
+		case CMD_LINE_OPT_DST_MAC_NUM:
+			printf("set dst mac addr\n");
+			l2fwd_parse_dst_mac(optarg);
 			break;
 
 		/* enable vlan packet */
