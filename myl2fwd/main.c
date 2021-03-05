@@ -17,6 +17,7 @@
 #include <getopt.h>
 #include <signal.h>
 #include <stdbool.h>
+#include <sys/time.h>
 
 #include <rte_common.h>
 #include <rte_log.h>
@@ -225,9 +226,18 @@ static uint16_t add_timestamps_tx_cycle(uint16_t portid, uint16_t qidx __rte_unu
 static uint16_t add_timestamps_tx(uint16_t portid, uint16_t qidx __rte_unused,
                 struct rte_mbuf **pkts, uint16_t nb_pkts, void *_ __rte_unused)
 {
-        struct timespec t_tx;
+        /*
+	struct timespec t_tx;
 	clock_gettime(CLOCK_MONOTONIC_RAW, &t_tx);
-	uint64_t now = t_tx.tv_nsec;
+	uint64_t now_s = t_tx.tv_sec;
+	uint64_t now_ns = t_tx.tv_nsec;
+	*/
+
+	struct timeval t_tx;
+	gettimeofday(&t_tx, NULL);
+	uint64_t now_s = t_tx.tv_sec;
+        uint64_t now_us = t_tx.tv_usec;
+
 	unsigned i;
 	int tsc_dynfield_offset;
 
@@ -237,8 +247,9 @@ static uint16_t add_timestamps_tx(uint16_t portid, uint16_t qidx __rte_unused,
 		tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 
         for (i = 0; i < nb_pkts; i++) {
-                *tsc_field(pkts[i], tsc_dynfield_offset) = now;
-                port_statistics[portid].timestamp = now;
+                *tsc_field(pkts[i], tsc_dynfield_offset) = now_s;
+		*tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)) = now_us;
+                port_statistics[portid].timestamp = now_s;
         }
         return nb_pkts;
 }
@@ -338,8 +349,12 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
         /* not valid to use cycle time i.e. rte_rdtsc() if the tx and rx have different frequency.
          * timestamp should get from gettimeofday?
          */
-        struct timespec t_rx;
-	uint64_t now = 0;
+        //struct timespec t_rx;
+	struct timeval t_rx;
+	uint64_t now_s = 0;
+	uint64_t now_us = 0;
+	uint64_t total_sec = 0;
+	uint64_t total_usec = 0;
 	uint64_t cycles = 0;
         uint64_t latency_cycles = 0;
         unsigned i;
@@ -360,22 +375,29 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 	}
 
         for (i = 0; i < nb_pkts; i++) {
+		/*
 		clock_gettime(CLOCK_MONOTONIC_RAW, &t_rx);
-		now = t_rx.tv_nsec;
+		now_s = t_rx.tv_sec;
+		now_ns = t_rx.tv_nsec;
+		*/
+		gettimeofday(&t_rx, NULL);
+		now_s = t_rx.tv_sec;
+		now_us = t_rx.tv_usec;
 
-		//eth_hdr = rte_pktmbuf_mtod(pkts[i], struct rte_ether_hdr *);
-                //if (eth_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4))
-                //        continue;
+                total_sec += now_s - *tsc_field(pkts[i], tsc_dynfield_offset);
+		total_usec += now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
 
-		/* rx timestamp might overflow and reset to 0. This cause the diff spike to huge.
-		 * Thus, skip calculate latency for this case */
-		if (unlikely(*tsc_field(pkts[i], tsc_dynfield_offset) > now)) {
-			//port_statistics[portid].timestamp_error += 1;
-			continue;
-		}
+		/* debug code */
+		/*
+		printf("tx now_s = %" PRIu64 "\n", *tsc_field(pkts[i], tsc_dynfield_offset));
+		printf("rx now_s = %" PRIu64 "\n", now_s);
+		printf("tx now_us = %" PRIu64 "\n", *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)));
+		printf("rx now_us = %" PRIu64 "\n", now_us);
+		*/
 
-                cycles += now - *tsc_field(pkts[i], tsc_dynfield_offset);
-		port_statistics[portid].timestamp = now;
+		cycles += (total_sec * 1000 * 1000) + total_usec;
+		//printf("total latency_us = %" PRIu64 "\n\n", cycles);
+		port_statistics[portid].timestamp = now_s;
         }
 
         latency_numbers.total_cycles += cycles;
@@ -389,7 +411,7 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
         latency_cycles = latency_numbers.total_cycles / latency_numbers.total_pkts;
 
 	/* convert latency to miliseconds, ms */
-	latency_us = (double)latency_cycles / 1000000;
+	latency_us = (double)latency_cycles / 1000;
 	port_statistics[portid].latency_us = latency_us;
 
 	/* calculate jitter. jitter is difference in latency */
@@ -718,7 +740,8 @@ static struct rte_mbuf *construct_packet(unsigned portid)
 	udp_hdr->dgram_len = rte_cpu_to_be_16(pkt_size - sizeof((struct rte_ether_hdr *)eth_hdr) - sizeof((struct rte_ipv4_hdr *)ip_hdr));
 
 	/* fill the data in the packet */
-        char priv_data[] = "abcdefghijklmnopqrstuvwxyz1234567890;:',<>/?{}[]!@#$%^&*()_+-=~`";
+        //char priv_data[] = "abcdefghijklmnopqrstuvwxyz1234567890;:',<>/?{}[]!@#$%^&*()_+-=~`";
+	char priv_data[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 	void *p;
 	p = (struct rte_udp_hdr *)(udp_hdr + 1);
 	strcpy(p, priv_data);
