@@ -168,6 +168,8 @@ struct l2fwd_port_statistics {
 	uint64_t timestamp_error;
 	uint64_t elapsed_tx_time;
 	uint64_t elapsed_rx_time;
+	uint64_t timestamp_s;
+	uint64_t timestamp_us;
 } __rte_cache_aligned;
 
 struct l2fwd_port_statistics port_statistics[RTE_MAX_ETHPORTS];
@@ -249,7 +251,8 @@ static uint16_t add_timestamps_tx(uint16_t portid, uint16_t qidx __rte_unused,
         for (i = 0; i < nb_pkts; i++) {
                 *tsc_field(pkts[i], tsc_dynfield_offset) = now_s;
 		*tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)) = now_us;
-                port_statistics[portid].timestamp = now_s;
+		port_statistics[portid].timestamp_s = now_s;
+                port_statistics[portid].timestamp_us = now_us;
         }
         return nb_pkts;
 }
@@ -357,6 +360,7 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 	uint64_t total_usec = 0;
 	uint64_t cycles = 0;
         uint64_t latency_cycles = 0;
+	int64_t t_us = 0;
         unsigned i;
 	double latency_us = 0;
 	uint64_t jitter;
@@ -385,7 +389,10 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 		now_us = t_rx.tv_usec;
 
                 total_sec += now_s - *tsc_field(pkts[i], tsc_dynfield_offset);
-		total_usec += now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
+		//total_usec += now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
+		t_us = now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
+		//printf("t_us = %ld\n", t_us);
+		total_usec = (uint64_t)t_us;
 
 		/* debug code */
 		/*
@@ -397,7 +404,8 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 
 		cycles += (total_sec * 1000 * 1000) + total_usec;
 		//printf("total latency_us = %" PRIu64 "\n\n", cycles);
-		port_statistics[portid].timestamp = now_s;
+		port_statistics[portid].timestamp_s = now_s;
+		port_statistics[portid].timestamp_us = now_us;
         }
 
         latency_numbers.total_cycles += cycles;
@@ -515,7 +523,8 @@ static void print_stats(void)
 			port_statistics[portid].ip_d_addr[3]);
 		printf("\nSW Jitter (ns)       %18"PRIu64, port_statistics[portid].jitter_ns);
 		printf("\nSW Latency (ms):     %18.4f", port_statistics[portid].latency_us);
-		printf("\nSW timestamp (ns):   %18"PRIu64, port_statistics[portid].timestamp);
+		printf("\nSW timestamp (s):    %18"PRIu64, port_statistics[portid].timestamp_s);
+		printf("\nSW timestamp (us):   %18"PRIu64, port_statistics[portid].timestamp_us);
 		printf("\nTimestamp error:     %18"PRIu64, port_statistics[portid].timestamp_error);
 
 		total_packets_dropped += port_statistics[portid].dropped;
@@ -842,6 +851,7 @@ static void rx_only(void)
 
 		for (i = 0; i < qconf->n_rx_port; i++) {
 			nb_rx = rte_eth_rx_burst(portid, 0, pkts_burst, MAX_PKT_BURST);
+			/*
 			nb_rx_actual = rte_eth_stats_get(portid, &eth_rx_stats);
 
 			if (nb_rx_actual == 0) {
@@ -855,11 +865,12 @@ static void rx_only(void)
                                 port_statistics[portid].tx_error = eth_rx_stats.oerrors;
                                 port_statistics[portid].rx_error = eth_rx_stats.ierrors;
                         }
+			*/
 
 			if (unlikely(nb_rx == 0))
 				continue;
 
-			//port_statistics[portid].tx += nb_rx;
+			port_statistics[portid].rx += nb_rx;
 			port_statistics[portid].rx_burst = nb_rx;
 			for (j = 0; j < nb_rx; j++) {
 				m = pkts_burst[j];
