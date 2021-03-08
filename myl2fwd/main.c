@@ -353,8 +353,8 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 	struct timeval t_rx;
 	uint64_t now_s = 0;
 	uint64_t now_us = 0;
-	uint64_t total_sec = 0;
-	uint64_t total_usec = 0;
+	uint64_t diff_sec = 0;
+	uint64_t diff_usec = 0;
 	uint64_t cycles = 0;
         uint64_t latency_cycles = 0;
 	int64_t t_us = 0;
@@ -364,7 +364,6 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 	uint64_t jitter_ns;
         int tsc_dynfield_offset;
 	struct rte_ether_hdr *eth_hdr;
-	uint64_t max_us = 1000000;
 
 	if (vlan_flag)
 		tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + 4;
@@ -385,25 +384,23 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 		gettimeofday(&t_rx, NULL);
 		now_s = t_rx.tv_sec;
 		now_us = t_rx.tv_usec;
-		total_usec = 0;
 
 		/* debug code to filter packet size */
 		if (rte_pktmbuf_pkt_len(pkts[i]) > 64)
 			continue;
 
 
-                total_sec += now_s - *tsc_field(pkts[i], tsc_dynfield_offset);
-		//total_usec += now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
+                diff_sec += now_s - *tsc_field(pkts[i], tsc_dynfield_offset);
 
 		if (likely(now_us > *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)))) 
-			total_usec = now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
+			diff_usec = now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
 
 		else {
-			total_usec = max_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)) + now_us;
+			diff_usec = *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)) - now_us;
 			port_statistics[portid].timestamp_error += 1;
 		}
 
-		cycles += (total_sec * 1000 * 1000) + total_usec;
+		cycles += (diff_sec * 1000 * 1000) + diff_usec;
 
 		/* debug code */
 		/*
@@ -423,7 +420,7 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
         latency_numbers.total_pkts += nb_pkts;
 	port_statistics[portid].timestamp = latency_numbers.total_cycles;
 
-        /* latency in nanoseconds */
+        /* latency in microseconds */
         latency_cycles = latency_numbers.total_cycles / latency_numbers.total_pkts;
 
 	/* convert latency to miliseconds, ms */
