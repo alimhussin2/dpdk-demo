@@ -124,15 +124,12 @@ struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 static struct rte_eth_dev_tx_buffer *tx_buffer[RTE_MAX_ETHPORTS];
 
 static struct rte_eth_conf port_conf = {
-	.rxmode = {
-		.split_hdr_size = 0,
-	},
-	.txmode = {
-		.mq_mode = ETH_MQ_TX_NONE,
-		.offloads = DEV_TX_OFFLOAD_IPV4_CKSUM |
-			DEV_TX_OFFLOAD_UDP_CKSUM |
-			DEV_TX_OFFLOAD_TCP_CKSUM,
-	},
+        .rxmode = {
+                .split_hdr_size = 0,
+        },
+        .txmode = {
+                .mq_mode = ETH_MQ_TX_NONE,
+        },
 };
 
 struct rte_mempool * l2fwd_pktmbuf_pool = NULL;
@@ -367,6 +364,7 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 	uint64_t jitter_ns;
         int tsc_dynfield_offset;
 	struct rte_ether_hdr *eth_hdr;
+	uint64_t max_us = 1000000;
 
 	if (vlan_flag)
 		tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + 4;
@@ -387,12 +385,25 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 		gettimeofday(&t_rx, NULL);
 		now_s = t_rx.tv_sec;
 		now_us = t_rx.tv_usec;
+		total_usec = 0;
+
+		/* debug code to filter packet size */
+		if (rte_pktmbuf_pkt_len(pkts[i]) > 64)
+			continue;
+
 
                 total_sec += now_s - *tsc_field(pkts[i], tsc_dynfield_offset);
 		//total_usec += now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
-		t_us = now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
-		//printf("t_us = %ld\n", t_us);
-		total_usec = (uint64_t)t_us;
+
+		if (likely(now_us > *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)))) 
+			total_usec = now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
+
+		else {
+			total_usec = max_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)) + now_us;
+			port_statistics[portid].timestamp_error += 1;
+		}
+
+		cycles += (total_sec * 1000 * 1000) + total_usec;
 
 		/* debug code */
 		/*
@@ -400,20 +411,17 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 		printf("rx now_s = %" PRIu64 "\n", now_s);
 		printf("tx now_us = %" PRIu64 "\n", *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)));
 		printf("rx now_us = %" PRIu64 "\n", now_us);
+		printf("diff usec = %" PRIu64 "\n", total_usec);
+		printf("total latency_us = %" PRIu64 "\n\n", cycles);
 		*/
 
-		cycles += (total_sec * 1000 * 1000) + total_usec;
-		//printf("total latency_us = %" PRIu64 "\n\n", cycles);
 		port_statistics[portid].timestamp_s = now_s;
 		port_statistics[portid].timestamp_us = now_us;
         }
 
         latency_numbers.total_cycles += cycles;
         latency_numbers.total_pkts += nb_pkts;
-
-	//if (unlikely(nb_pkts == 0)) {
-	//	return nb_pkts;
-	//}
+	port_statistics[portid].timestamp = latency_numbers.total_cycles;
 
         /* latency in nanoseconds */
         latency_cycles = latency_numbers.total_cycles / latency_numbers.total_pkts;
@@ -525,6 +533,7 @@ static void print_stats(void)
 		printf("\nSW Latency (ms):     %18.4f", port_statistics[portid].latency_us);
 		printf("\nSW timestamp (s):    %18"PRIu64, port_statistics[portid].timestamp_s);
 		printf("\nSW timestamp (us):   %18"PRIu64, port_statistics[portid].timestamp_us);
+		printf("\ntotal timestamp (us):%18"PRIu64, port_statistics[portid].timestamp);
 		printf("\nTimestamp error:     %18"PRIu64, port_statistics[portid].timestamp_error);
 
 		total_packets_dropped += port_statistics[portid].dropped;
@@ -1683,6 +1692,7 @@ static void intercept_packets(struct rte_mbuf *m, unsigned portid)
 		offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_vlan_hdr);
 	}
 
+	/*
 	struct rte_ipv4_hdr *ip4h = rte_pktmbuf_mtod_offset(m, struct rte_ipv4_hdr *, offset);
         rte_be32_t ip_s = ip4h->src_addr;
         rte_be32_t ip_d = ip4h->dst_addr;
@@ -1707,6 +1717,7 @@ static void intercept_packets(struct rte_mbuf *m, unsigned portid)
                 packet_type |= RTE_PTYPE_L4_TCP;
                 strcpy(port_statistics[portid].ip_protocol, "tcp");
         }
+	*/
 
 	port_statistics[portid].ether_type = ether_type;
 	port_statistics[portid].d_addr = eth_hdr->d_addr;
