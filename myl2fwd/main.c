@@ -236,6 +236,7 @@ static uint16_t add_timestamps_tx(uint16_t portid, uint16_t qidx __rte_unused,
 	gettimeofday(&t_tx, NULL);
 	uint64_t now_s = t_tx.tv_sec;
         uint64_t now_us = t_tx.tv_usec;
+	uint64_t now_usec = (now_s * 1000 * 1000) + now_us;
 
 	unsigned i;
 	int tsc_dynfield_offset;
@@ -246,8 +247,7 @@ static uint16_t add_timestamps_tx(uint16_t portid, uint16_t qidx __rte_unused,
 		tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
 
         for (i = 0; i < nb_pkts; i++) {
-                *tsc_field(pkts[i], tsc_dynfield_offset) = now_s;
-		*tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)) = now_us;
+                *tsc_field(pkts[i], tsc_dynfield_offset) = now_usec;
 		port_statistics[portid].timestamp_s = now_s;
                 port_statistics[portid].timestamp_us = now_us;
         }
@@ -364,6 +364,7 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 	uint64_t jitter_ns;
         int tsc_dynfield_offset;
 	struct rte_ether_hdr *eth_hdr;
+	uint64_t now_usec = 0;
 
 	if (vlan_flag)
 		tsc_dynfield_offset = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) + 4;
@@ -384,23 +385,21 @@ static uint16_t calc_sw_latency(uint16_t portid __rte_unused, uint16_t qidx __rt
 		gettimeofday(&t_rx, NULL);
 		now_s = t_rx.tv_sec;
 		now_us = t_rx.tv_usec;
+		now_usec = (now_s * 1000 * 1000) + now_us;
 
 		/* debug code to filter packet size */
 		if (rte_pktmbuf_pkt_len(pkts[i]) > 64)
 			continue;
 
-
-                diff_sec += now_s - *tsc_field(pkts[i], tsc_dynfield_offset);
-
-		if (likely(now_us > *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)))) 
-			diff_usec = now_us - *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us));
+		if (likely(now_usec > *tsc_field(pkts[i], tsc_dynfield_offset)))
+			diff_usec = now_usec - *tsc_field(pkts[i], tsc_dynfield_offset);
 
 		else {
-			diff_usec = *tsc_field(pkts[i], tsc_dynfield_offset + sizeof(now_us)) - now_us;
+			diff_usec = *tsc_field(pkts[i], tsc_dynfield_offset) - now_usec;
 			port_statistics[portid].timestamp_error += 1;
 		}
 
-		cycles += (diff_sec * 1000 * 1000) + diff_usec;
+		cycles += diff_usec;
 
 		/* debug code */
 		/*
